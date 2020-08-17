@@ -1,7 +1,7 @@
 #include <cstdint>
 #include <deque>
 #include <iomanip>
-#include <iostream>
+#include <unordered_map>
 #include <vector>
 #include <sstream>
 
@@ -20,7 +20,7 @@ bool ReadFile(std::string_view file_path, std::vector<uint8_t>* output_buffer) {
     );
 
     if (h_input_file == INVALID_HANDLE_VALUE) {
-        std::cerr << "Failed to open input file: " << GetLastError() << std::endl;
+        fprintf(stderr, "Failed to open input file: %lu", GetLastError());
         return false;
     }
 
@@ -32,7 +32,7 @@ bool ReadFile(std::string_view file_path, std::vector<uint8_t>* output_buffer) {
     BOOL read_success = ::ReadFile(h_input_file, output_buffer->data(), file_size, &number_of_bytes_read, NULL);
 
     if (!read_success) {
-        std::cerr << "Failed to read input file: " << GetLastError() << std::endl;
+        fprintf(stderr, "Failed to read input file: %lu", GetLastError());
         CloseHandle(h_input_file);
         return false;
     }
@@ -101,7 +101,7 @@ bool WriteFile(std::string_view file_path, std::string_view contents) {
     );
 
     if (h_output_file == INVALID_HANDLE_VALUE) {
-        std::cerr << "Failed to create output file: " << GetLastError() << std::endl;
+        fprintf(stderr, "Failed to create output file: %lu", GetLastError());
         CloseHandle(h_output_file);
         return false;
     }
@@ -117,7 +117,7 @@ bool WriteFile(std::string_view file_path, std::string_view contents) {
     );
 
     if (!write_success) {
-        std::cerr << "Failed to write output file: " << GetLastError() << std::endl;
+        fprintf(stderr, "Failed to write output file: %lu", GetLastError());
         CloseHandle(h_output_file);
         return false;
     }
@@ -125,26 +125,189 @@ bool WriteFile(std::string_view file_path, std::string_view contents) {
     return true;
 }
 
-int main(int argc, const char* argv[]) {
+struct CommandLineOption {
 
-    if (argc != 3) {
-        std::cout << R"(
+    enum class Id {
+        HELP,
+        ROOT_NAMESPACE,
+        PRINT_OUTPUT_FILES,
+    } id;
+
+    std::string long_name;
+    std::string short_name;
+    std::string description;
+    std::string default;
+
+    enum class Type {
+        BOOLEAN,
+        STRING,
+    } type;
+};
+
+CommandLineOption command_line_options[] = {
+    CommandLineOption {
+        .id = CommandLineOption::Id::HELP,
+        .long_name = "help",
+        .short_name = "h",
+        .description = "print this summary",
+        .default = "",
+        .type = CommandLineOption::Type::BOOLEAN,
+    },
+    CommandLineOption {
+        .id = CommandLineOption::Id::ROOT_NAMESPACE,
+        .long_name = "root-namespace",
+        .short_name = "n",
+        .description = "name of root namespace in output",
+        .default = "Bin",
+        .type = CommandLineOption::Type::STRING,
+    },
+    CommandLineOption {
+        .id = CommandLineOption::Id::PRINT_OUTPUT_FILES,
+        .long_name = "print-output-files",
+        .short_name = "p",
+        .description = "print absolute paths of output source files\ne.g. to feed into build systems",
+        .default = "",
+        .type = CommandLineOption::Type::BOOLEAN,
+    },
+};
+
+void PrintHelp() {
+    printf(R"(
 Usage:
 
-    dir2src <input-path> <output-path>
+    dir2src [OPTIONS] <input-path> <output-path>
 
-)";
+Options:
+
+)");
+
+    constexpr size_t flag_str_length = 32;
+
+    for (const auto& flag : command_line_options) {
+
+        std::stringstream ss;
+
+        ss << "    ";
+
+        if (!flag.short_name.empty()) {
+            ss << "-" << flag.short_name;
+
+            if (!flag.long_name.empty()) {
+                ss << ", ";
+            }
+
+        } else {
+            ss << "    ";
+
+            if (flag.long_name.empty()) {
+                ss << "  ";
+            }
+        }
+
+        if (!flag.long_name.empty()) {
+            ss << "--" << flag.long_name;
+        }
+
+        std::string spacing_str(flag_str_length - ss.str().size(), ' ');
+        ss << spacing_str;
+
+        std::vector<std::string> descriptions = SplitString(flag.description, "\n");
+
+        ss << descriptions[0];
+
+        if (descriptions.size() > 0) {
+            for (size_t i = 1; i < descriptions.size(); ++i) {
+                ss << "\n" << std::string(flag_str_length, ' ');
+                ss << descriptions[i];
+            }
+        }
+
+        if (!flag.default.empty()) {
+            ss << " [default: \"" << flag.default << "\"]";
+        }
+
+        ss << "\n";
+
+        printf("%s", ss.str().c_str());
+    }
+
+    printf("\n");
+}
+
+int main(int argc, const char* argv[]) {
+
+    if (argc < 3) {
+        PrintHelp();
         return 0;
     }
 
+    std::unordered_map<CommandLineOption::Id, std::string> args;
+
+    bool print_help = false;
+    std::string unknown_arg;
+
+    // Parse command line arguments
+    for (int i = 1; i < argc - 2; ++i) {
+        std::string arg = argv[i];
+
+        const CommandLineOption* command_line_option = nullptr;
+
+        for (const auto& option : command_line_options) {
+            if (arg == "-" + option.short_name ||
+                arg == "--" + option.long_name) {
+                command_line_option = &option;
+                break;
+            }
+        }
+
+        if (command_line_option && command_line_option->id == CommandLineOption::Id::HELP) {
+            print_help = true;
+        }
+
+        if (command_line_option == nullptr) {
+            unknown_arg = arg;
+            continue;
+        }
+
+        if (command_line_option->type == CommandLineOption::Type::BOOLEAN) {
+            args[command_line_option->id] = "";
+        }
+        else if (command_line_option->type == CommandLineOption::Type::STRING) {
+            // Read ahead
+            ++i;
+            if (i >= argc - 2) {
+                fprintf(stderr, "Missing value for option %s\n", arg.c_str());
+                return 1;
+            }
+
+            std::string val = argv[i];
+            args[command_line_option->id] = val;
+        }
+    }
+
+    for (const auto& a : args) {
+        printf("Arg %d: %s\n", static_cast<int>(a.first), a.second.c_str());
+    }
+
+    if (print_help) {
+        PrintHelp();
+        return 0;
+    }
+
+    if (!unknown_arg.empty()) {
+        fprintf(stderr, "Unknown option \"%s\"\n", unknown_arg.c_str());
+        return 1;
+    }
+
     std::string root_input_path  = NormalizeDirectoryString(argv[1]);
+
     std::string root_output_path = NormalizeDirectoryString(argv[2]);
 
     std::vector<std::string> root_input_directories = SplitString(root_input_path, "\\");
     std::vector<std::string> root_output_directories = SplitString(root_output_path, "\\");
 
-    std::cout << "Input path:  " << root_input_path << std::endl;
-    std::cout << "Output path: " << root_output_path << std::endl;
+    printf("Input path: %s\n", root_input_path.c_str());
+    printf("Output path: %s\n", root_output_path.c_str());
 
     std::vector<std::string> open_directory_list{ root_input_path };
 
@@ -170,8 +333,6 @@ namespace Bin {
             search_path.push_back('*');
         }
 
-        std::cout << "Search path: " << search_path << std::endl;
-
         WIN32_FIND_DATA find_data = {};
         HANDLE h_find_file = ::FindFirstFile(search_path.c_str(), &find_data);
 
@@ -188,15 +349,12 @@ namespace Bin {
             std::string relative_path = dir + find_data.cFileName;
 
             if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                std::cout << "Added new dir to search list: " << relative_path << std::endl;
                 open_directory_list.push_back(relative_path);
             }
             else {
                 
                 std::vector<uint8_t> file_data;
                 ReadFile(relative_path, &file_data);
-
-                std::cout << "Found file: " << find_data.cFileName << ", size: " << file_data.size() << std::endl;
 
                 std::vector<std::string> directories = SplitString(dir, "\\");
                 std::vector<std::string> output_directories = directories;
@@ -277,8 +435,6 @@ namespace Bin {
                     ::CreateDirectory(current_directory_path.c_str(), NULL);
                 }
 
-                std::cout << "C: " << current_directory_path << std::endl;
-
                 ::WriteFile(current_directory_path + find_data.cFileName + ".cpp", output_data);
 
                 // Populate namespaces for header
@@ -313,7 +469,6 @@ namespace Bin {
     }
 
     std::string header_output_data = ss_header_file.str();
-    std::cout << "Outputting header to: " << root_output_path << std::endl;
     ::WriteFile(root_output_path + "bin.h", header_output_data);
 
     return 0;
