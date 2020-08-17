@@ -40,17 +40,6 @@ bool ReadFile(std::string_view file_path, std::vector<uint8_t>* output_buffer) {
     return true;
 }
 
-std::string AppendWildcardToDirectory(std::string path) {
-    if (path[path.size() - 1] != '*') {
-        if (path[path.size() - 1] != '\\') {
-            path.push_back('\\');
-        }
-        path.push_back('*');
-    }
-
-    return path;
-}
-
 std::string CodeFriendlyString(std::string str) {
     for (auto& c : str) {
         if (!std::isalnum(c)) {
@@ -67,6 +56,37 @@ std::string CodeFriendlyString(std::string str) {
     }
 
     return str;
+}
+
+std::vector<std::string> SplitString(std::string string, const std::string& delimiter) {
+    std::vector<std::string> ret;
+
+    size_t delimiter_idx = 0;
+    while (delimiter_idx != std::string::npos) {
+        delimiter_idx = string.find(delimiter);
+        std::string token = string.substr(0, delimiter_idx);
+
+        if (!token.empty()) {
+            ret.push_back(token);
+        }
+        string.erase(0, delimiter_idx + 1);
+    }
+
+    return ret;
+}
+
+std::string NormalizeDirectoryString(std::string string) {
+    if (string.empty()) return string;
+
+    for (auto& c : string) {
+        if (c == '/') c = '\\';
+    }
+
+    if (string.back() != '\\') {
+        string.push_back('\\');
+    }
+
+    return string;
 }
 
 bool WriteFile(std::string_view file_path, std::string_view contents) {
@@ -117,12 +137,16 @@ Usage:
         return 0;
     }
 
-    std::string input_path  = argv[1];
-    std::string output_path = argv[2];
+    std::string root_input_path  = NormalizeDirectoryString(argv[1]);
+    std::string root_output_path = NormalizeDirectoryString(argv[2]);
 
-    std::string current_path = input_path;
+    std::vector<std::string> root_input_directories = SplitString(root_input_path, "\\");
+    std::vector<std::string> root_output_directories = SplitString(root_output_path, "\\");
 
-    std::vector<std::string> open_directory_list{ current_path };
+    std::cout << "Input path:  " << root_input_path << std::endl;
+    std::cout << "Output path: " << root_output_path << std::endl;
+
+    std::vector<std::string> open_directory_list{ root_input_path };
 
     std::vector<std::string> header_namespaces;
 
@@ -138,10 +162,15 @@ namespace Bin {
 )";
 
     while (!open_directory_list.empty()) {
-        std::string dir = open_directory_list.back();
+        std::string dir = NormalizeDirectoryString(open_directory_list.back());
         open_directory_list.pop_back();
 
-        std::string search_path = AppendWildcardToDirectory(dir);
+        std::string search_path = dir;
+        if (search_path.back() != '*') {
+            search_path.push_back('*');
+        }
+
+        std::cout << "Search path: " << search_path << std::endl;
 
         WIN32_FIND_DATA find_data = {};
         HANDLE h_find_file = ::FindFirstFile(search_path.c_str(), &find_data);
@@ -151,31 +180,37 @@ namespace Bin {
             if (!strcmp(find_data.cFileName, ".") ||
                 !strcmp(find_data.cFileName, "..")) {
 
-BOOL found_next_file = ::FindNextFile(h_find_file, &find_data);
-if (!found_next_file) break;
-continue;
+                BOOL found_next_file = ::FindNextFile(h_find_file, &find_data);
+                if (!found_next_file) break;
+                continue;
             }
 
-            std::string relative_path = dir + "\\" + find_data.cFileName;
+            std::string relative_path = dir + find_data.cFileName;
 
             if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                std::cout << "Added new dir to search list: " << relative_path << std::endl;
                 open_directory_list.push_back(relative_path);
             }
             else {
+                
                 std::vector<uint8_t> file_data;
                 ReadFile(relative_path, &file_data);
-                std::cout << relative_path << ": " << file_data.size() << std::endl;
 
-                std::vector<std::string> namespaces;
-                std::string s = dir;
+                std::cout << "Found file: " << find_data.cFileName << ", size: " << file_data.size() << std::endl;
 
-                size_t delimiter_idx = 0;
-                while (delimiter_idx != std::string::npos) {
-                    delimiter_idx = s.find('\\');
-                    std::string token = s.substr(0, delimiter_idx);
-                    namespaces.push_back(CodeFriendlyString(token));
-                    s.erase(0, delimiter_idx + 1);
+                std::vector<std::string> directories = SplitString(dir, "\\");
+                std::vector<std::string> output_directories = directories;
+                output_directories.erase(output_directories.begin(), output_directories.begin() + root_input_directories.size());
+
+                std::vector<std::string> namespaces = output_directories;
+
+                output_directories.insert(output_directories.begin(), root_output_directories.begin(), root_output_directories.end());
+
+                for (auto& str : namespaces) {
+                    str = CodeFriendlyString(str);
                 }
+
+                std::string s = dir;
 
                 std::stringstream ss_cpp_file;
                 ss_cpp_file << R"(// AUTOGENERATED
@@ -232,7 +267,19 @@ namespace Bin {
 
                 std::string output_data = ss_cpp_file.str();
 
-                ::WriteFile(std::string("output\\") + find_data.cFileName + ".cpp", output_data);
+                std::string file_output_path = root_output_path + dir;
+                std::vector<std::string> file_output_directory_list = SplitString(file_output_path, "\\");
+
+                // Create nested output directories
+                std::string current_directory_path;
+                for (const auto& directory : output_directories) {
+                    current_directory_path += directory + "\\";
+                    ::CreateDirectory(current_directory_path.c_str(), NULL);
+                }
+
+                std::cout << "C: " << current_directory_path << std::endl;
+
+                ::WriteFile(current_directory_path + find_data.cFileName + ".cpp", output_data);
 
                 // Populate namespaces for header
                 for (size_t i = 0; i < header_namespaces.size(); ++i) {
@@ -266,7 +313,8 @@ namespace Bin {
     }
 
     std::string header_output_data = ss_header_file.str();
-    ::WriteFile("output\\bin.h", header_output_data);
+    std::cout << "Outputting header to: " << root_output_path << std::endl;
+    ::WriteFile(root_output_path + "bin.h", header_output_data);
 
     return 0;
 }
